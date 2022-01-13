@@ -43,6 +43,10 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 
 	/// latest proposal id of a proposer address
 	mapping (address => uint) public latestProposalIds;
+	
+	/// @notice Receipts of ballots for the entire set of voters of a proposal id
+	/// proposalId => voter address => receipt
+	mapping (uint => mapping(address => Receipt)) receipts;
 
 	struct Deposit {
 		address from;
@@ -51,19 +55,38 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 		bool proposerDeposit;
 	}
 
+	/// 0.1x votes, unlocked.
+	/// 1x votes, locked for an enactment period following a successful vote.
+	/// 2x votes, locked for 2x enactment periods following a successful vote.
+	/// 3x votes, locked for 4x...
+	/// 4x votes, locked for 8x...
+	/// 5x votes, locked for 16x...
+	/// 6x votes, locked for 32x...
+	enum Conviction {
+		None,
+		Locked1x,
+		Locked2x,
+		Locked3x,
+		Locked4x,
+		Locked5x,
+		Locked6x
+	}
+
 	/// @notice Ballot receipt record for a voter
 	struct Receipt {
-			/// @notice Whether or not a vote has been cast
-			bool hasVoted;
+		uint proposalId;
+		
+		/// @notice Whether or not a vote has been cast
+		bool hasVoted;
 
-			/// @notice Whether or not the voter supports the proposal or abstains
-			uint8 support;
+		/// @notice Whether or not the voter supports the proposal or abstains
+		uint8 support;
 
-			/// @notice The deposit attached to the vote
-			uint deposit;
+		/// @notice The deposit attached to the vote
+		uint deposit;
 
-			/// @notice 
-			Conviction conviction;
+		/// @notice conviction based lockup period
+		Conviction conviction;
 	}
 
 
@@ -104,7 +127,7 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 			bool isReferendum;
 
 			/// @notice Receipts of ballots for the entire set of voters
-			mapping (address => Receipt) receipts;
+			// mapping (address => Receipt) receipts;
 		}
 
 		enum ProposalState {
@@ -116,23 +139,6 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 			Cancelled, // proposer cancelled it
 			Executed, // on chain executed
 			Vetoed // council has vetoed the referendum
-		}
-
-		/// 0.1x votes, unlocked.
-		/// 1x votes, locked for an enactment period following a successful vote.
-		/// 2x votes, locked for 2x enactment periods following a successful vote.
-		/// 3x votes, locked for 4x...
-		/// 4x votes, locked for 8x...
-		/// 5x votes, locked for 16x...
-		/// 6x votes, locked for 32x...
-		enum Conviction {
-			None,
-			Locked1x,
-			Locked2x,
-			Locked3x,
-			Locked4x,
-			Locked5x,
-			Locked6x
 		}
 
 		struct Vote {
@@ -166,6 +172,12 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 
 contract GovernorEvents is GovernorDelegateStorageV1 {
 		event NewImplementation(address oldImplmentation, address newImplmentation);
+		/// @notice Emitted when pendingAdmin is changed
+    event NewPendingAdmin(address oldPendingAdmin, address newPendingAdmin);
+
+    /// @notice Emitted when pendingAdmin is accepted, which means admin is updated
+    event NewAdmin(address oldAdmin, address newAdmin);
+
 		/// A motion has been proposed by a public account.
 		event Proposed(uint proposal_index, uint deposit);
 		/// A public proposal has been tabled for referendum vote.

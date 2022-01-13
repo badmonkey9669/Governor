@@ -3,9 +3,20 @@ pragma experimental ABIEncoderV2;
 
 import "./GovernorInterfaces.sol";
 
-contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
+/**
+ * 1. Anyone can propose with a deposit
+ * 2. All proposals enter pool to be seconded during a Voting_Period
+ * 3. At the end of each Voting_Period, the top seconded proposal gets Tabled into a referendum for Conviction voting
+ * 4. At the end of a Voting_Period for a refereundum, the Adaptive Quroum Biasing calculates whether it passed or not.
+ * 5. If passed, council members get one last Veto_Period to veto with a super majority vote.
+ * 6. If vetoed, the referendum gets scrapped
+ * 7. If not, the referendum gets put into Timelock to be executed after some time.
+
+ */
+
+contract GovernorV1 is GovernorDelegateStorageV2, GovernorEvents {
     /// @notice The name of this contract
-    string public constant name = "DikasteriaV1";
+    string public constant name = "GovernorV1";
 
     /// @notice The maximum number of actions that can be included in a proposal
     uint public constant proposalMaxOperations = 10; // 10 actions
@@ -22,10 +33,10 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
       * @param dika_ The address of Dika token
       */
     function initialize(address timelock_, address dika_) public {
-        require(address(timelock) == address(0), "GovernorBravo::initialize: can only initialize once");
-        require(msg.sender == admin, "GovernorBravo::initialize: admin only");
-        require(timelock_ != address(0), "GovernorBravo::initialize: invalid timelock address");
-        require(dika_ != address(0), "GovernorBravo::initialize: invalid dika address");
+        require(address(timelock) == address(0), "Governor::initialize: can only initialize once");
+        require(msg.sender == admin, "Governor::initialize: admin only");
+        require(timelock_ != address(0), "Governor::initialize: invalid timelock address");
+        require(dika_ != address(0), "Governor::initialize: invalid dika address");
 
         timelock = TimelockInterface(timelock_);
         dika = DikasteiraInterface(dika_);
@@ -59,29 +70,34 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
         uint latestProposalId = latestProposalIds[msg.sender];
         if (latestProposalId != 0) {
           ProposalState proposersLatestProposalState = state(latestProposalId);
-          require(proposersLatestProposalState != ProposalState.Active, "GovernorBravo::propose: one live proposal per proposer, found an already active proposal");
-          require(proposersLatestProposalState != ProposalState.Pending, "GovernorBravo::propose: one live proposal per proposer, found an already pending proposal");
+          require(proposersLatestProposalState != ProposalState.Started, "Governor::propose: one live proposal per proposer, found an already started proposal");
+          require(proposersLatestProposalState != ProposalState.Tabled, "Governor::propose: one live proposal per proposer, found an already tabled proposal");
         }
 
         proposalCount++;
         Proposal memory newProposal = Proposal({
             id: proposalCount,
             proposer: msg.sender,
-            eta: 0,
             targets: targets,
             values: values,
             signatures: signatures,
             calldatas: calldatas,
+            seconders: 0,
             forVotes: 0,
             againstVotes: 0,
-            abstainVotes: 0,
             canceled: false,
-            executed: false
+            executed: false,
+            isReferendum: false
         });
 
         proposals[newProposal.id] = newProposal;
         latestProposalIds[newProposal.proposer] = newProposal.id;
-        deposits[newProposal.proposer] += msg.value;
+        deposits[newProposal.proposer] = Deposit({
+            from: newProposal.proposer,
+            amount: msg.value,
+            proposalId: newProposal.id,
+            proposerDeposit: true
+        });
 
         emit Proposed(newProposal.id, msg.value);
         return newProposal.id;
@@ -90,7 +106,6 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
     /**
       * @notice Gets actions of a proposal
       * @param proposalId the id of the proposal
-      * @return Targets, values, signatures, and calldatas of the proposal actions
       */
     function getActions(uint proposalId) external view returns (address[] memory targets, uint[] memory values, string[] memory signatures, bytes[] memory calldatas) {
         Proposal storage p = proposals[proposalId];
@@ -104,7 +119,7 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
       * @return The voting receipt
       */
     function getReceipt(uint proposalId, address voter) external view returns (Receipt memory) {
-        return proposals[proposalId].receipts[voter];
+        return receipts[proposalId][voter];
     }
 
     /**
@@ -113,37 +128,33 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
       * @return Proposal state
       */
     function state(uint proposalId) public view returns (ProposalState) {
-        require(proposalCount >= proposalId && proposalId > initialProposalId, "GovernorBravo::state: invalid proposal id");
+        require(proposalCount >= proposalId && proposalId > initialProposalId, "Governor::state: invalid proposal id");
         Proposal storage proposal = proposals[proposalId];
         if (proposal.canceled) {
-            return ProposalState.Canceled;
-        } else if (block.number <= proposal.startBlock) {
-            return ProposalState.Pending;
-        } else if (block.number <= proposal.endBlock) {
-            return ProposalState.Active;
-        } else if (proposal.forVotes <= proposal.againstVotes || proposal.forVotes < quorumVotes) {
+            return ProposalState.Cancelled;
+        } else if (proposal.isReferendum) {
+            return ProposalState.Tabled;
+        } else if (!proposal.isReferendum) {
+            return ProposalState.Started;
+        } else if (proposal.forVotes <= proposal.againstVotes || proposal.forVotes < 100) { // TODO: Adaptive Quorum Biasing (no fixed quorum)
             return ProposalState.NotPassed;
-        } else if (proposal.eta == 0) {
-            return ProposalState.Passed;
         } else if (proposal.executed) {
             return ProposalState.Executed;
-        } else if (block.timestamp >= add256(proposal.eta, timelock.GRACE_PERIOD())) {
-            return ProposalState.Expired;
         } else {
-            return ProposalState.Queued;
+            return ProposalState.Proposed;
         }
     }
 
     /**
     /**
-      * @notice Initiate the GovernorBravo contract
+      * @notice Initiate the Governor contract
       * @dev Admin only. Sets initial proposal id which initiates the contract, ensuring a continuous proposal id count
       * @param governorAlpha The address for the Governor to continue the proposal id count from
       */
     function _initiate(address governorAlpha) external {
-        require(msg.sender == admin, "GovernorBravo::_initiate: admin only");
-        require(initialProposalId == 0, "GovernorBravo::_initiate: can only initiate once");
-        proposalCount = GovernorAlpha(governorAlpha).proposalCount();
+        require(msg.sender == admin, "Governor::_initiate: admin only");
+        require(initialProposalId == 0, "Governor::_initiate: can only initiate once");
+
         initialProposalId = proposalCount;
         timelock.acceptAdmin();
     }
@@ -155,7 +166,7 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
       */
     function _setPendingAdmin(address newPendingAdmin) external {
         // Check caller = admin
-        require(msg.sender == admin, "GovernorBravo:_setPendingAdmin: admin only");
+        require(msg.sender == admin, "Governor:_setPendingAdmin: admin only");
 
         // Save current value, if any, for inclusion in log
         address oldPendingAdmin = pendingAdmin;
@@ -173,7 +184,7 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
       */
     function _acceptAdmin() external {
         // Check caller is pendingAdmin and pendingAdmin ≠ address(0)
-        require(msg.sender == pendingAdmin && msg.sender != address(0), "GovernorBravo:_acceptAdmin: pending admin only");
+        require(msg.sender == pendingAdmin && msg.sender != address(0), "Governor:_acceptAdmin: pending admin only");
 
         // Save current values for inclusion in log
         address oldAdmin = admin;
@@ -200,7 +211,7 @@ contract DikasteriaV1 is GovernorDelegateStorageV2, GovernorEvents {
         return a - b;
     }
 
-    function getChainIdInternal() internal pure returns (uint) {
+    function getChainIdInternal() internal view returns (uint) {
         uint chainId;
         assembly { chainId := chainid() }
         return chainId;
