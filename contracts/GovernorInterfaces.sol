@@ -1,6 +1,8 @@
 pragma solidity ^0.8.0;
 pragma experimental ABIEncoderV2;
 
+interface DikasteiraInterface {}
+
 contract GovernorDelegatorStorage {
     /// @notice Administrator for this contract
     address public admin;
@@ -20,9 +22,101 @@ contract GovernorDelegatorStorage {
  * GovernorBravoDelegateStorageVX.
  */
 contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
-		struct Referendum {}
+	DikasteiraInterface public dika;
+	TimelockInterface public timelock;
 
-    struct Proposal {}
+	/// How often (in blocks) new public referenda are launched.
+	uint public LAUNCH_PERIOD;
+
+	/// How often (in blocks) to check for new votes.
+	uint public VOTING_PERIOD;
+
+	/// The minimum amount to be used as a deposit for a public referendum proposal.
+	uint public MINIMUM_DEPOSIT = 10e18;
+
+	uint public initialProposalId = 0;
+
+	uint public proposalCount = 0;
+
+	mapping (uint => Proposal) public proposals;
+	mapping (address => Deposit) public deposits;
+
+	/// latest proposal id of a proposer address
+	mapping (address => uint) public latestProposalIds;
+
+	struct Deposit {
+		address from;
+		uint amount;
+		uint proposalId;
+		bool proposerDeposit;
+	}
+
+	/// @notice Ballot receipt record for a voter
+	struct Receipt {
+			/// @notice Whether or not a vote has been cast
+			bool hasVoted;
+
+			/// @notice Whether or not the voter supports the proposal or abstains
+			uint8 support;
+
+			/// @notice The deposit attached to the vote
+			uint deposit;
+
+			/// @notice 
+			Conviction conviction;
+	}
+
+
+	struct Proposal {
+				/// @notice Unique id for looking up a proposal
+			uint id;
+
+			/// @notice Creator of the proposal
+			address proposer;
+
+			/// @notice the ordered list of target addresses for calls to be made
+			address[] targets;
+
+			/// @notice The ordered list of values (i.e. msg.value) to be passed to the calls to be made
+			uint[] values;
+
+			/// @notice The ordered list of function signatures to be called
+			string[] signatures;
+
+			/// @notice The ordered list of calldata to be passed to each call
+			bytes[] calldatas;
+
+			/// @notice Seconding signals agreement with a proposal, moves it higher on the proposal queue, and requires a matching deposit to the original.
+			uint seconders;
+
+			/// @notice Conviction votes for this referendum
+			uint forVotes;
+
+			/// @notice Conviction votes against this referendum
+			uint againstVotes;
+
+			/// @notice Flag marking whether the proposal has been canceled
+			bool canceled;
+
+			/// @notice Flag marking whether the proposal has been executed
+			bool executed;
+
+			bool isReferendum;
+
+			/// @notice Receipts of ballots for the entire set of voters
+			mapping (address => Receipt) receipts;
+		}
+
+		enum ProposalState {
+			Proposed, // proposed to be seconded into being tabled into a referendum vote
+			Tabled, // put up for a referendum vote
+			Started, // proposal voting period has started
+			Passed, // referendum has passed Adaptive Quorum Biasing
+			NotPassed, // not passed
+			Cancelled, // proposer cancelled it
+			Executed, // on chain executed
+			Vetoed // council has vetoed the referendum
+		}
 
 		/// 0.1x votes, unlocked.
 		/// 1x votes, locked for an enactment period following a successful vote.
@@ -71,6 +165,7 @@ contract GovernorDelegateStorageV1 is GovernorDelegatorStorage {
 }
 
 contract GovernorEvents is GovernorDelegateStorageV1 {
+		event NewImplementation(address oldImplmentation, address newImplmentation);
 		/// A motion has been proposed by a public account.
 		event Proposed(uint proposal_index, uint deposit);
 		/// A public proposal has been tabled for referendum vote.
@@ -133,13 +228,4 @@ interface TimelockInterface {
     function queueTransaction(address target, uint value, string calldata signature, bytes calldata data, uint eta) external returns (bytes32);
     function cancelTransaction(address target, uint value, string calldata signature, bytes calldata data, uint eta) external;
     function executeTransaction(address target, uint value, string calldata signature, bytes calldata data, uint eta) external payable returns (bytes memory);
-}
-
-interface CompInterface {
-    function getPriorVotes(address account, uint blockNumber) external view returns (uint96);
-}
-
-interface GovernorAlpha {
-    /// @notice The total number of proposals
-    function proposalCount() external returns (uint);
 }
